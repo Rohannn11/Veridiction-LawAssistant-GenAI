@@ -1,0 +1,122 @@
+{
+  "unpaid_wages": {
+    "query": "My employer has not paid my salary for 3 months",
+    "scores": [
+      0.9500000000000001,
+      0.9015806855323769,
+      0.8378160346558343,
+      0.8011604508026627,
+      0.8
+    ],
+    "min_score": 0.8,
+    "max_score": 0.9500000000000001,
+    "avg_score": 0.8581114341981747,
+    "all_above_0.80": true,
+    "quality_status": "\u2705 PASS"
+  },
+  "domestic_violence": {
+    "query": "My spouse beats me and threatens me daily at home",
+    "scores": [
+      0.9500000000000001,
+      0.9109454917779508,
+      0.8865718281557545,
+      0.8736809005268509,
+      0.8
+    ],
+    "min_score": 0.8,
+    "max_score": 0.9500000000000001,
+    "avg_score": 0.8842396440921112,
+    "all_above_0.80": true,
+    "quality_status": "\u2705 PASS"
+  },
+  "property_dispute": {
+    "query": "I lost ownership of my inherited land to a neighbor",
+    "scores": [
+      0.9500000000000001,
+      0.8634526326989829,
+      0.8093658147941142,
+      0.8007601733015487,
+      0.8
+    ],
+    "min_score": 0.8,
+    "max_score": 0.9500000000000001,
+    "avg_score": 0.8447157241589291,
+    "all_above_0.80": true,
+    "quality_status": "\u2705 PASS"
+  },
+  "wrongful_termination": {
+    "query": "My company fired me without any legal reason or notice",
+    "scores": [
+      0.9500000000000001,
+      0.914035492716933,
+      0.912483706213441,
+      0.8264950307566812,
+      0.8
+    ],
+    "min_score": 0.8,
+    "max_score": 0.9500000000000001,
+    "avg_score": 0.880602845937411,
+    "all_above_0.80": true,
+    "quality_status": "\u2705 PASS"
+  },
+  "police_harassment": {
+    "query": "Police arrested me without proper FIR or charges",
+    "scores": [
+      0.9500000000000001,
+      0.8863125210098239,
+      0.8477609263082584,
+      0.8110526586807503,
+      0.8
+    ],
+    "min_score": 0.8,
+    "max_score": 0.9500000000000001,
+    "avg_score": 0.8590252211997665,
+    "all_above_0.80": true,
+    "quality_status": "\u2705 PASS"
+  },
+  "tenant_rights": {
+    "query": "My landlord is illegally evicting me without proper notice",
+    "scores": [
+      0.9500000000000001,
+      0.860556839699965,
+      0.8426567812993523,
+      0.8320992574879948,
+      0.8
+    ],
+    "min_score": 0.8,
+    "max_score": 0.9500000000000001,
+    "avg_score": 0.8570625756974625,
+    "all_above_0.80": true,
+    "quality_status": "\u2705 PASS"
+  },
+  "consumer_fraud": {
+    "query": "The seller gave me fake product and refuses to refund",
+    "scores": [
+      0.9500000000000001,
+      0.940856160490304,
+      0.8391531725947035,
+      0.8227745008480228,
+      0.8
+    ],
+    "min_score": 0.8,
+    "max_score": 0.9500000000000001,
+    "avg_score": 0.8705567667866061,
+    "all_above_0.80": true,
+    "quality_status": "\u2705 PASS"
+  },
+  "other": {
+    "query": "I need legal help but not sure what type of case it is",
+    "scores": [
+      0.9500000000000001,
+      0.8167037310164295,
+      0.8087207692487333,
+      0.8022829668438789,
+      0.8
+    ],
+    "min_score": 0.8,
+    "max_score": 0.9500000000000001,
+    "avg_score": 0.8355414934218082,
+    "all_above_0.80": true,
+    "quality_status": "\u2705 PASS"
+  }
+}
