@@ -287,7 +287,25 @@ class VeridictionGraph:
 
 def _build_cli() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Veridiction Step 3 LangGraph flow")
-    parser.add_argument("--query", type=str, default="My employer has not paid my salary for 3 months.")
+    parser.add_argument("--query", type=str, default=None)
+    parser.add_argument("--audio-file", type=str, default=None, help="Optional audio file input for Step 4")
+    parser.add_argument("--live-mic", action="store_true", help="Capture real-time microphone input")
+    parser.add_argument(
+        "--record-seconds",
+        type=int,
+        default=0,
+        help="If > 0, records microphone audio and transcribes before running flow",
+    )
+    parser.add_argument("--record-out", type=str, default="data/audio_recorded.wav")
+    parser.add_argument("--audio-max-seconds", type=int, default=30)
+    parser.add_argument("--audio-silence-threshold", type=float, default=0.01)
+    parser.add_argument("--audio-silence-seconds", type=float, default=2.0)
+    parser.add_argument("--audio-model-name", type=str, default="distil-large-v3")
+    parser.add_argument("--audio-model-dir", type=str, default="data/models/faster-whisper")
+    parser.add_argument("--audio-local-files-only", action="store_true")
+    parser.add_argument("--audio-language", type=str, default="en")
+    parser.add_argument("--audio-beam-size", type=int, default=5)
+    parser.add_argument("--audio-no-vad", action="store_true")
     parser.add_argument("--top-k", type=int, default=5)
     return parser
 
@@ -295,8 +313,81 @@ def _build_cli() -> argparse.ArgumentParser:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
     args = _build_cli().parse_args()
+
+    query_text = args.query
+    audio_metadata: dict[str, Any] | None = None
+
+    if args.live_mic or args.audio_file or args.record_seconds > 0:
+        from audio.transcriber import (
+            AudioTranscriber,
+            TranscriberConfig,
+            record_microphone_live_to_wav,
+            record_microphone_to_wav,
+        )
+
+        input_audio = args.audio_file
+        if args.live_mic:
+            recorded_file = record_microphone_live_to_wav(
+                output_wav=args.record_out,
+                sample_rate=16000,
+                channels=1,
+                max_seconds=args.audio_max_seconds,
+                silence_threshold=args.audio_silence_threshold,
+                silence_seconds=args.audio_silence_seconds,
+                enable_enter_to_stop=True,
+            )
+            input_audio = str(recorded_file)
+        elif args.record_seconds > 0:
+            recorded_file = record_microphone_to_wav(
+                output_wav=args.record_out,
+                duration_seconds=args.record_seconds,
+                sample_rate=16000,
+                channels=1,
+            )
+            input_audio = str(recorded_file)
+
+        if not input_audio:
+            raise ValueError("Audio mode requires --live-mic, --audio-file, or --record-seconds > 0")
+
+        transcriber = AudioTranscriber(
+            config=TranscriberConfig(
+                model_name=args.audio_model_name,
+                model_dir=args.audio_model_dir,
+                local_files_only=args.audio_local_files_only,
+                language=args.audio_language,
+                beam_size=args.audio_beam_size,
+                vad_filter=not args.audio_no_vad,
+            )
+        )
+        transcription = transcriber.transcribe_file(
+            audio_path=input_audio,
+            language=args.audio_language,
+            beam_size=args.audio_beam_size,
+            vad_filter=not args.audio_no_vad,
+        )
+        query_text = transcription.get("text", "").strip()
+        audio_metadata = {
+            "audio_file": input_audio,
+            "language": transcription.get("language", args.audio_language),
+            "language_probability": transcription.get("language_probability", 0.0),
+            "duration": transcription.get("duration", 0.0),
+            "segments": len(transcription.get("segments", [])),
+        }
+
+    if audio_metadata is not None and not query_text:
+        raise ValueError("Transcription produced empty text. Try clearer audio or disable background noise.")
+
+    if not query_text:
+        query_text = "My employer has not paid my salary for 3 months."
+
     flow = VeridictionGraph(top_k=args.top_k)
-    output = flow.run(args.query)
+    output = flow.run(query_text)
+    if audio_metadata is not None:
+        output["input_mode"] = "audio"
+        output["transcript"] = query_text
+        output["audio_metadata"] = audio_metadata
+    else:
+        output["input_mode"] = "text"
     print(json.dumps(output, ensure_ascii=True, indent=2))
 
 
