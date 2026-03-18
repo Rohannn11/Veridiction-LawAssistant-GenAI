@@ -1,6 +1,10 @@
-"""Step 3: Veridiction LangGraph flow (Retriever -> Advisor -> Safety).
+"""Step 3+: Veridiction LangGraph flow (Retriever -> Structured Advisor -> Safety).
 
-English-first implementation with structured outputs and local model fallback.
+Implements:
+- Claim classification + retrieval
+- Structured legal response sections
+- Grok-backed advisor generation with deterministic fallback
+- Safety flags and mandatory disclaimer
 """
 
 from __future__ import annotations
@@ -8,8 +12,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -20,6 +27,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from legal.knowledge_base import LegalKnowledgeBase
 from nlp.classifier import ClaimClassifier
 from rag.retriever import LegalRetriever
 
@@ -32,163 +40,396 @@ MANDATORY_DISCLAIMER = (
 )
 
 
-class AdvisorOutput(BaseModel):
-    """Structured payload from the advisor node."""
+def _read_env_value(key: str) -> str | None:
+    value = os.getenv(key)
+    if value and value.strip():
+        return value.strip()
 
-    issue_summary: str = Field(description="One short summary of the user's legal issue")
-    action_steps: list[str] = Field(description="Step-by-step practical next actions")
-    legal_basis: list[str] = Field(description="Grounding points from retrieved passages")
-    documents_to_collect: list[str] = Field(description="Evidence/documents user should gather")
-    escalation_guidance: str = Field(description="When to escalate to lawyer/police/authority")
+    env_path = Path(".env")
+    if not env_path.exists():
+        return None
+
+    try:
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            if k.strip() == key:
+                return v.strip().strip('"').strip("'")
+    except OSError:
+        return None
+    return None
+
+
+class FlowchartStep(BaseModel):
+    step: int
+    title: str
+    details: str
+
+
+class CaseScenario(BaseModel):
+    summary: str
+    key_facts: list[str] = Field(default_factory=list)
+    missing_details: list[str] = Field(default_factory=list)
+
+
+class PossibleSteps(BaseModel):
+    immediate_actions: list[str] = Field(default_factory=list)
+    legal_actions: list[str] = Field(default_factory=list)
+    next_48_hours: list[str] = Field(default_factory=list)
+
+
+class RequiredDocumentation(BaseModel):
+    mandatory: list[str] = Field(default_factory=list)
+    supporting: list[str] = Field(default_factory=list)
+    optional: list[str] = Field(default_factory=list)
+
+
+class CourtsAndProcess(BaseModel):
+    state: str
+    courts_forum: list[str] = Field(default_factory=list)
+    application_process: list[str] = Field(default_factory=list)
+    jurisdiction_note: str
+
+
+class SeverityAssessment(BaseModel):
+    level: str
+    rationale: str
+    time_sensitivity: str
+
+
+class HelplineInfo(BaseModel):
+    name: str
+    number: str
+    applicability: str
+    availability: str
+
+
+class StructuredLegalOutput(BaseModel):
+    case_scenario: CaseScenario
+    possible_steps: PossibleSteps
+    required_documentation: RequiredDocumentation
+    courts_and_filing_process: CourtsAndProcess
+    severity_assessment: SeverityAssessment
+    helplines_india: list[HelplineInfo] = Field(default_factory=list)
+    flowchart: list[FlowchartStep] = Field(default_factory=list)
+    tts_summary: str
+
+
+class AdvisorOutput(BaseModel):
+    issue_summary: str
+    action_steps: list[str] = Field(default_factory=list)
+    legal_basis: list[str] = Field(default_factory=list)
+    documents_to_collect: list[str] = Field(default_factory=list)
+    escalation_guidance: str
 
 
 class SafetyOutput(BaseModel):
-    """Structured payload from the safety node."""
-
     risk_flags: list[str] = Field(default_factory=list)
     safe_next_steps: list[str] = Field(default_factory=list)
     disclaimer: str = Field(default=MANDATORY_DISCLAIMER)
 
 
 class VeridictionState(TypedDict, total=False):
-    """State object passed across graph nodes."""
-
     user_query: str
     claim: dict[str, Any]
     retrieved_passages: list[dict[str, Any]]
     advisor_output: dict[str, Any]
+    structured_output: dict[str, Any]
     safety_output: dict[str, Any]
     final_response: dict[str, Any]
     error: str
 
 
-class LocalAdvisor:
-    """Local LLM advisor with robust fallback when model runtime is unavailable."""
+class GrokClient:
+    """Minimal Grok chat-completions client with schema-driven JSON response."""
 
-    def __init__(self, model_id: str = "meta-llama/Llama-3.2-3B-Instruct") -> None:
-        self.model_id = model_id
-        self._generator = None
+    def __init__(self) -> None:
+        self.api_key = _read_env_value("GROK_API_KEY")
+        self.base_url = _read_env_value("GROK_BASE_URL") or "https://api.x.ai/v1"
+        self.model = _read_env_value("GROK_MODEL") or "grok-2-latest"
 
-    def _ensure_generator(self) -> None:
-        if self._generator is not None:
-            return
-        try:
-            import torch
-            from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, pipeline
+    @property
+    def enabled(self) -> bool:
+        return bool(self.api_key)
 
-            quant_cfg = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.float16,
-            )
-            tokenizer = AutoTokenizer.from_pretrained(self.model_id)
-            model = AutoModelForCausalLM.from_pretrained(
-                self.model_id,
-                device_map="auto",
-                quantization_config=quant_cfg,
-            )
-            self._generator = pipeline(
-                "text-generation",
-                model=model,
-                tokenizer=tokenizer,
-            )
-            LOGGER.info("Loaded advisor LLM in 4-bit mode: %s", self.model_id)
-        except Exception as exc:
-            LOGGER.warning("Advisor LLM unavailable; using deterministic fallback: %s", exc)
-            self._generator = False
+    def generate_structured(
+        self,
+        query: str,
+        claim: dict[str, Any],
+        passages: list[dict[str, Any]],
+        mapping: dict[str, Any],
+        state_name: str,
+        helplines: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not self.enabled:
+            raise RuntimeError("Grok client is not enabled")
 
-    def generate(self, query: str, claim: dict[str, Any], passages: list[dict[str, Any]]) -> AdvisorOutput:
-        """Generate structured advisor output from query and retrieved passages."""
-        self._ensure_generator()
-        if self._generator is False:
-            return self._fallback_advice(query=query, claim=claim, passages=passages)
+        top_passages = []
+        for item in passages[:4]:
+            text = str(item.get("passage", "")).replace("\n", " ")[:600]
+            top_passages.append({"score": item.get("score"), "passage": text})
 
-        prompt = self._build_prompt(query=query, claim=claim, passages=passages)
-        try:
-            raw = self._generator(
-                prompt,
-                max_new_tokens=450,
-                do_sample=False,
-                temperature=0.1,
-                repetition_penalty=1.05,
-            )[0]["generated_text"]
-            parsed = self._extract_json(raw)
-            return AdvisorOutput.model_validate(parsed)
-        except (ValidationError, ValueError, KeyError, IndexError) as exc:
-            LOGGER.warning("LLM output parse failed; using fallback advice: %s", exc)
-            return self._fallback_advice(query=query, claim=claim, passages=passages)
+        prompt = {
+            "query": query,
+            "claim": claim,
+            "state": state_name,
+            "mapping": mapping,
+            "helplines": helplines,
+            "retrieved_passages": top_passages,
+            "output_requirements": {
+                "language": "English",
+                "json_only": True,
+                "sections": [
+                    "case_scenario",
+                    "possible_steps",
+                    "required_documentation",
+                    "courts_and_filing_process",
+                    "severity_assessment",
+                    "helplines_india",
+                    "flowchart",
+                    "tts_summary",
+                ],
+            },
+        }
 
-    def _build_prompt(self, query: str, claim: dict[str, Any], passages: list[dict[str, Any]]) -> str:
-        snippets: list[str] = []
-        for idx, item in enumerate(passages[:5], start=1):
-            passage = item.get("passage", "")
-            score = item.get("score")
-            snippets.append(f"[{idx}] score={score}: {passage[:380]}")
-        context_block = "\n".join(snippets)
+        body = {
+            "model": self.model,
+            "temperature": 0.15,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an Indian legal triage assistant for Maharashtra. Return STRICT JSON only. "
+                        "Use retrieved evidence and mapping. Keep it practical and safety-aware."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(prompt, ensure_ascii=True),
+                },
+            ],
+        }
 
-        return (
-            "You are an English-only legal research assistant for India. "
-            "Use retrieved context conservatively and avoid hallucination.\n\n"
-            f"User query: {query}\n"
-            f"Claim JSON: {json.dumps(claim, ensure_ascii=True)}\n\n"
-            "Retrieved passages:\n"
-            f"{context_block}\n\n"
-            "Return STRICT JSON only with keys: "
-            "issue_summary, action_steps, legal_basis, documents_to_collect, escalation_guidance."
+        req = urllib.request.Request(
+            url=f"{self.base_url.rstrip('/')}/chat/completions",
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            method="POST",
         )
 
-    def _extract_json(self, text: str) -> dict[str, Any]:
-        block = re.search(r"\{[\s\S]*\}", text)
-        if not block:
-            raise ValueError("No JSON object found in advisor output")
-        return json.loads(block.group(0))
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                raw = resp.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"Grok HTTP error: {exc.code}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Grok connection error: {exc.reason}") from exc
 
-    def _fallback_advice(self, query: str, claim: dict[str, Any], passages: list[dict[str, Any]]) -> AdvisorOutput:
+        data = json.loads(raw)
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if not content:
+            raise RuntimeError("Grok returned empty content")
+
+        match = re.search(r"\{[\s\S]*\}", content)
+        if not match:
+            raise RuntimeError("Grok returned non-JSON content")
+
+        return json.loads(match.group(0))
+
+
+class StructuredAdvisor:
+    """Builds structured legal response via Grok (preferred) or deterministic fallback."""
+
+    def __init__(self, knowledge: LegalKnowledgeBase, provider: str = "auto") -> None:
+        self.knowledge = knowledge
+        self.provider = provider
+        self.grok = GrokClient()
+
+    def generate(self, query: str, claim: dict[str, Any], passages: list[dict[str, Any]]) -> StructuredLegalOutput:
+        claim_type = claim.get("claim_type", "other")
+        mapping = self.knowledge.claim_mapping(claim_type)
+
+        if self._can_use_grok():
+            try:
+                raw = self.grok.generate_structured(
+                    query=query,
+                    claim=claim,
+                    passages=passages,
+                    mapping=mapping,
+                    state_name=self.knowledge.state,
+                    helplines=self.knowledge.national_helplines,
+                )
+                return StructuredLegalOutput.model_validate(raw)
+            except Exception as exc:
+                LOGGER.warning("Grok structured generation failed, using deterministic fallback: %s", exc)
+
+        return self._deterministic_response(query=query, claim=claim, passages=passages, mapping=mapping)
+
+    def _can_use_grok(self) -> bool:
+        if self.provider == "fallback":
+            return False
+        if self.provider == "grok":
+            return self.grok.enabled
+        return self.grok.enabled
+
+    def _deterministic_response(
+        self,
+        query: str,
+        claim: dict[str, Any],
+        passages: list[dict[str, Any]],
+        mapping: dict[str, Any],
+    ) -> StructuredLegalOutput:
         claim_type = claim.get("claim_type", "other")
         urgency = claim.get("urgency", "medium")
-        legal_basis = [item.get("passage", "")[:220] for item in passages[:3] if item.get("passage")]
 
-        action_steps = [
-            "Write a dated incident summary in simple English with exact timeline.",
-            "Collect primary evidence: IDs, contracts, salary slips, bills, messages, photos, or FIR details.",
-            "Visit nearest legal aid clinic or District Legal Services Authority with documents.",
-            "File a formal written complaint with acknowledgement receipt.",
+        key_facts = [
+            f"Detected claim type: {claim_type}",
+            f"Classifier urgency: {urgency}",
+            f"User statement: {query[:220]}",
         ]
-        if claim_type == "unpaid_wages":
-            action_steps.insert(2, "Prepare wage calculation sheet month-wise and attach proof of work.")
-        if claim_type == "police_harassment":
-            action_steps.insert(0, "Document officer name, station, date/time, and any witnesses immediately.")
+        if passages:
+            key_facts.append("Retrieved legal references support this category.")
 
-        documents = [
-            "Government ID proof",
-            "Address proof",
-            "Any agreements or appointment letter",
-            "Payment or bank transaction proof",
-            "Messages/recordings/photos relevant to the incident",
+        missing_details = [
+            "Exact incident timeline (date/time/place)",
+            "Identity details of involved persons",
+            "Whether any prior complaint/FIR/legal notice was filed",
         ]
 
-        escalation = "If there is immediate danger, contact emergency services and a qualified lawyer without delay."
+        process_steps = list(mapping.get("application_process", []))
+        courts = list(mapping.get("courts_forum", []))
+        documents = list(mapping.get("documents_required", []))
+
+        immediate_actions = process_steps[:2] or [
+            "Ensure immediate personal safety and collect essential evidence.",
+            "Document incident details with timeline.",
+        ]
+        legal_actions = process_steps[2:] or [
+            "Approach the proper authority/court with a written complaint.",
+            "Consult legal aid for representation and filing strategy.",
+        ]
+
+        severity_level = self._severity_from_claim(claim_type=claim_type, urgency=urgency, query=query)
+        severity_rationale = (
+            f"Severity marked as {severity_level} due to claim category '{claim_type}', urgency '{urgency}', "
+            "and reported risk context."
+        )
+        time_sensitivity = "Immediate action advised (within hours)." if severity_level in {"high", "critical"} else "Action advised within 24-48 hours."
+
+        flowchart = self._build_flowchart(
+            immediate_actions=immediate_actions,
+            legal_actions=legal_actions,
+            process_steps=process_steps,
+        )
+
+        summary = self._tts_summary(
+            claim_type=claim_type,
+            severity_level=severity_level,
+            immediate_actions=immediate_actions,
+            courts=courts,
+        )
+
+        return StructuredLegalOutput(
+            case_scenario=CaseScenario(
+                summary=f"This appears to be a {claim_type.replace('_', ' ')} scenario in Maharashtra requiring structured legal action.",
+                key_facts=key_facts,
+                missing_details=missing_details,
+            ),
+            possible_steps=PossibleSteps(
+                immediate_actions=immediate_actions,
+                legal_actions=legal_actions,
+                next_48_hours=[
+                    "Consult District Legal Services Authority for guided filing support.",
+                    "Prepare documentary bundle and maintain a dated chronology.",
+                ],
+            ),
+            required_documentation=RequiredDocumentation(
+                mandatory=documents[:4] if documents else ["Identity proof", "Primary incident evidence"],
+                supporting=documents[4:] if len(documents) > 4 else ["Witness details", "Additional communication records"],
+                optional=["Any prior legal notices", "Affidavit-style chronology"],
+            ),
+            courts_and_filing_process=CourtsAndProcess(
+                state=self.knowledge.state,
+                courts_forum=courts,
+                application_process=process_steps,
+                jurisdiction_note=(
+                    f"Jurisdiction generally depends on where the cause of action arose in {self.knowledge.state} "
+                    "or where parties reside/work."
+                ),
+            ),
+            severity_assessment=SeverityAssessment(
+                level=severity_level,
+                rationale=severity_rationale,
+                time_sensitivity=time_sensitivity,
+            ),
+            helplines_india=[HelplineInfo(**h) for h in self.knowledge.national_helplines],
+            flowchart=flowchart,
+            tts_summary=summary,
+        )
+
+    def _severity_from_claim(self, claim_type: str, urgency: str, query: str) -> str:
+        lowered = query.lower()
+        if any(x in lowered for x in ("kill", "weapon", "strang", "suicide", "immediate danger")):
+            return "critical"
+        if claim_type in {"domestic_violence", "police_harassment"}:
+            return "high"
+        if urgency == "high":
+            return "high"
         if urgency == "medium":
-            escalation = "Escalate to a qualified lawyer within 24-48 hours if no response from authority."
+            return "medium"
+        return "low"
 
-        return AdvisorOutput(
-            issue_summary=f"Likely category: {claim_type}. User reports: {query[:120]}",
-            action_steps=action_steps,
-            legal_basis=legal_basis or ["Limited retrieved support. Re-run retrieval with refined query."],
-            documents_to_collect=documents,
-            escalation_guidance=escalation,
+    def _build_flowchart(
+        self,
+        immediate_actions: list[str],
+        legal_actions: list[str],
+        process_steps: list[str],
+    ) -> list[FlowchartStep]:
+        items = immediate_actions[:1] + legal_actions[:2] + process_steps[:2]
+        if not items:
+            items = [
+                "Document facts and evidence",
+                "Approach proper authority",
+                "File application/complaint",
+                "Attend hearings and comply with orders",
+            ]
+
+        steps: list[FlowchartStep] = []
+        for idx, text in enumerate(items, start=1):
+            steps.append(
+                FlowchartStep(
+                    step=idx,
+                    title=f"Step {idx}",
+                    details=text,
+                )
+            )
+        return steps
+
+    def _tts_summary(self, claim_type: str, severity_level: str, immediate_actions: list[str], courts: list[str]) -> str:
+        action = immediate_actions[0] if immediate_actions else "Document the incident and seek legal help promptly."
+        forum = courts[0] if courts else "the appropriate legal authority"
+        return (
+            f"This appears to be a {claim_type.replace('_', ' ')} matter with {severity_level} severity. "
+            f"First, {action} Then approach {forum}. "
+            "Please use emergency or legal aid helplines if immediate help is needed."
         )
 
 
 class VeridictionGraph:
-    """End-to-end Step 3 graph orchestration."""
+    """End-to-end graph orchestration with structured legal response."""
 
-    def __init__(self, top_k: int = 5) -> None:
+    def __init__(self, top_k: int = 5, advisor_provider: str = "auto") -> None:
         self.top_k = top_k
         self.classifier = ClaimClassifier()
         self.retriever = LegalRetriever()
-        self.advisor = LocalAdvisor()
+        self.knowledge = LegalKnowledgeBase()
+        self.structured_advisor = StructuredAdvisor(self.knowledge, provider=advisor_provider)
         self.graph = self._build_graph()
 
     def _build_graph(self):
@@ -212,22 +453,31 @@ class VeridictionGraph:
         query = state.get("user_query", "")
         claim = state.get("claim", {})
         passages = state.get("retrieved_passages", [])
-        advisor_output = self.advisor.generate(query=query, claim=claim, passages=passages)
-        return {"advisor_output": advisor_output.model_dump()}
+
+        structured = self.structured_advisor.generate(query=query, claim=claim, passages=passages)
+        advisor_output = self._legacy_advisor_output(structured, passages)
+
+        return {
+            "structured_output": structured.model_dump(),
+            "advisor_output": advisor_output,
+        }
 
     def safety_node(self, state: VeridictionState) -> VeridictionState:
         query = state.get("user_query", "").lower()
         claim = state.get("claim", {})
         advisor_output = state.get("advisor_output", {})
+        structured = dict(state.get("structured_output", {}) or {})
         risk_flags = self._risk_flags(query=query, claim=claim)
 
         safe_steps: list[str] = []
         if "immediate_danger" in risk_flags:
-            safe_steps.append("Seek immediate physical safety and contact emergency services.")
+            safe_steps.append("Seek immediate physical safety and call 112 emergency services.")
+        if "domestic_violence_risk" in risk_flags:
+            safe_steps.append("Use women safety helplines 181/1091 and approach nearest police station.")
         if "police_misconduct" in risk_flags:
-            safe_steps.append("Approach higher police authority or legal aid body with written complaint.")
+            safe_steps.append("Escalate complaint to SP/Commissioner and seek legal aid support.")
         if not safe_steps:
-            safe_steps.append("Follow documented steps and seek legal aid for case-specific guidance.")
+            safe_steps.append("Follow documented legal steps and seek legal aid for filing strategy.")
 
         safety_output = SafetyOutput(
             risk_flags=risk_flags,
@@ -235,16 +485,43 @@ class VeridictionGraph:
             disclaimer=MANDATORY_DISCLAIMER,
         )
 
+        if structured:
+            sev = structured.get("severity_assessment", {}) or {}
+            if "immediate_danger" in risk_flags:
+                sev["level"] = "critical"
+                sev["time_sensitivity"] = "Immediate action required within minutes/hours."
+            elif claim.get("urgency") == "high" and sev.get("level") not in {"critical", "high"}:
+                sev["level"] = "high"
+            structured["severity_assessment"] = sev
+
         final_response = {
             "claim_type": claim.get("claim_type", "other"),
             "urgency": claim.get("urgency", "low"),
             "confidence": claim.get("confidence", 0.0),
             "retrieved_passages": state.get("retrieved_passages", []),
             "advisor": advisor_output,
+            "structured_response": structured,
             "safety": safety_output.model_dump(),
-            "final_text": self._compose_final_text(advisor_output=advisor_output, safety=safety_output),
+            "tts_summary": structured.get("tts_summary", ""),
+            "final_text": self._compose_final_text(structured=structured, safety=safety_output),
         }
-        return {"safety_output": safety_output.model_dump(), "final_response": final_response}
+        return {
+            "safety_output": safety_output.model_dump(),
+            "final_response": final_response,
+        }
+
+    def _legacy_advisor_output(self, structured: StructuredLegalOutput, passages: list[dict[str, Any]]) -> dict[str, Any]:
+        legal_basis = [item.get("passage", "")[:220] for item in passages[:3] if item.get("passage")]
+        return AdvisorOutput(
+            issue_summary=structured.case_scenario.summary,
+            action_steps=(
+                structured.possible_steps.immediate_actions[:2]
+                + structured.possible_steps.legal_actions[:3]
+            ),
+            legal_basis=legal_basis,
+            documents_to_collect=structured.required_documentation.mandatory,
+            escalation_guidance=structured.severity_assessment.time_sensitivity,
+        ).model_dump()
 
     def _risk_flags(self, query: str, claim: dict[str, Any]) -> list[str]:
         flags: list[str] = []
@@ -258,21 +535,52 @@ class VeridictionGraph:
             flags.append("high_urgency")
         return flags
 
-    def _compose_final_text(self, advisor_output: dict[str, Any], safety: SafetyOutput) -> str:
+    def _compose_final_text(self, structured: dict[str, Any], safety: SafetyOutput) -> str:
+        scenario = structured.get("case_scenario", {}) or {}
+        steps = structured.get("possible_steps", {}) or {}
+        docs = structured.get("required_documentation", {}) or {}
+        filing = structured.get("courts_and_filing_process", {}) or {}
+        severity = structured.get("severity_assessment", {}) or {}
+        helplines = structured.get("helplines_india", []) or []
+        flowchart = structured.get("flowchart", []) or []
+
         lines: list[str] = []
-        summary = advisor_output.get("issue_summary", "")
-        if summary:
-            lines.append(f"Issue summary: {summary}")
+        lines.append("Case Scenario:")
+        lines.append(f"- {scenario.get('summary', '')}")
 
-        steps = advisor_output.get("action_steps", [])
-        if steps:
-            lines.append("Recommended steps:")
-            for idx, step in enumerate(steps, start=1):
-                lines.append(f"{idx}. {step}")
+        key_facts = scenario.get("key_facts", []) or []
+        if key_facts:
+            lines.append("- Key facts:")
+            for fact in key_facts:
+                lines.append(f"  * {fact}")
 
-        escalation = advisor_output.get("escalation_guidance", "")
-        if escalation:
-            lines.append(f"Escalation: {escalation}")
+        lines.append("Possible Steps:")
+        for item in steps.get("immediate_actions", []) or []:
+            lines.append(f"- Immediate: {item}")
+        for item in steps.get("legal_actions", []) or []:
+            lines.append(f"- Legal: {item}")
+
+        lines.append("Required Documentation:")
+        for item in docs.get("mandatory", []) or []:
+            lines.append(f"- Mandatory: {item}")
+
+        lines.append("Courts and Filing Process:")
+        for forum in filing.get("courts_forum", []) or []:
+            lines.append(f"- Forum: {forum}")
+        for idx, proc in enumerate(filing.get("application_process", []) or [], start=1):
+            lines.append(f"- Process {idx}: {proc}")
+
+        lines.append("Severity:")
+        lines.append(f"- Level: {severity.get('level', 'medium')}")
+        lines.append(f"- Rationale: {severity.get('rationale', '')}")
+
+        lines.append("Helplines (India):")
+        for h in helplines[:4]:
+            lines.append(f"- {h.get('name', '')}: {h.get('number', '')} ({h.get('availability', '')})")
+
+        lines.append("Flowchart:")
+        for step in flowchart:
+            lines.append(f"- Step {step.get('step', '')}: {step.get('details', '')}")
 
         if safety.risk_flags:
             lines.append(f"Risk flags: {', '.join(safety.risk_flags)}")
@@ -286,7 +594,7 @@ class VeridictionGraph:
 
 
 def _build_cli() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run Veridiction Step 3 LangGraph flow")
+    parser = argparse.ArgumentParser(description="Run Veridiction LangGraph flow")
     parser.add_argument("--query", type=str, default=None)
     parser.add_argument("--audio-file", type=str, default=None, help="Optional audio file input for Step 4")
     parser.add_argument("--live-mic", action="store_true", help="Capture real-time microphone input")
@@ -306,6 +614,7 @@ def _build_cli() -> argparse.ArgumentParser:
     parser.add_argument("--audio-language", type=str, default="en")
     parser.add_argument("--audio-beam-size", type=int, default=5)
     parser.add_argument("--audio-no-vad", action="store_true")
+    parser.add_argument("--advisor-provider", type=str, default="auto", choices=["auto", "grok", "fallback"])
     parser.add_argument("--enable-tts", action="store_true", help="Generate Step 5 TTS audio output")
     parser.add_argument("--tts-output", type=str, default="data/tts/final_response.mp3")
     parser.add_argument("--tts-engine", type=str, default="edge_tts", choices=["edge_tts", "pyttsx3"])
@@ -384,7 +693,7 @@ def main() -> None:
     if not query_text:
         query_text = "My employer has not paid my salary for 3 months."
 
-    flow = VeridictionGraph(top_k=args.top_k)
+    flow = VeridictionGraph(top_k=args.top_k, advisor_provider=args.advisor_provider)
     output = flow.run(query_text)
 
     if args.enable_tts:
@@ -397,8 +706,9 @@ def main() -> None:
                 output_dir="data/tts",
             )
         )
+        text_for_tts = output.get("tts_summary") or output.get("final_text", "")
         tts_result = tts_generator.speak_to_file(
-            text=output.get("final_text", ""),
+            text=text_for_tts,
             output_path=args.tts_output,
             include_disclaimer=False,
         )
@@ -407,6 +717,7 @@ def main() -> None:
             "audio_path": tts_result["audio_path"],
             "mime_type": tts_result["mime_type"],
             "size_bytes": tts_result["size_bytes"],
+            "spoken_text": text_for_tts,
         }
 
     if audio_metadata is not None:
@@ -415,6 +726,8 @@ def main() -> None:
         output["audio_metadata"] = audio_metadata
     else:
         output["input_mode"] = "text"
+        output["transcript"] = query_text
+
     print(json.dumps(output, ensure_ascii=True, indent=2))
 
 
