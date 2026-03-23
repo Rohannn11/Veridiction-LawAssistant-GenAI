@@ -135,6 +135,8 @@ class VeridictionState(TypedDict, total=False):
     user_query: str
     claim: dict[str, Any]
     retrieved_passages: list[dict[str, Any]]
+    retrieval_route: str
+    retrieval_query_variants: list[str]
     advisor_output: dict[str, Any]
     structured_output: dict[str, Any]
     safety_output: dict[str, Any]
@@ -481,18 +483,41 @@ class VeridictionGraph:
         query = state.get("user_query", "")
         claim = self.classifier.classify(query)
         passages = self.retriever.query(query, top_k=self.top_k)
-        return {"claim": claim, "retrieved_passages": passages}
+        retrieval_route = "judgment_priority"
+        query_variants: list[str] = []
+        if passages:
+            metadata = passages[0].get("metadata", {}) or {}
+            retrieval_route = str(metadata.get("retrieval_route", retrieval_route))
+            variants_raw = str(metadata.get("query_variants", "")).strip()
+            if variants_raw:
+                query_variants = [v.strip() for v in variants_raw.split(";") if v.strip()]
+
+        return {
+            "claim": claim,
+            "retrieved_passages": passages,
+            "retrieval_route": retrieval_route,
+            "retrieval_query_variants": query_variants,
+        }
 
     def advisor_node(self, state: VeridictionState) -> VeridictionState:
         query = state.get("user_query", "")
         claim = state.get("claim", {})
         passages = state.get("retrieved_passages", [])
+        retrieval_route = str(state.get("retrieval_route", "judgment_priority"))
+        query_variants = list(state.get("retrieval_query_variants", []) or [])
 
         structured = self.structured_advisor.generate(query=query, claim=claim, passages=passages)
         advisor_output = self._legacy_advisor_output(structured, passages)
+        structured_output = structured.model_dump()
+        structured_output["missing_facts_followups"] = self._missing_facts_followups(query=query, claim=claim)
+        structured_output["section_citations"] = self._section_citations(passages=passages)
+        structured_output["retrieval_context"] = {
+            "route": retrieval_route,
+            "query_variants": query_variants,
+        }
 
         return {
-            "structured_output": structured.model_dump(),
+            "structured_output": structured_output,
             "advisor_output": advisor_output,
         }
 
@@ -532,9 +557,15 @@ class VeridictionGraph:
             "claim_type": claim.get("claim_type", "other"),
             "urgency": claim.get("urgency", "low"),
             "confidence": claim.get("confidence", 0.0),
+            "intent_labels": claim.get("intent_labels", []),
+            "intent_scores": claim.get("intent_scores", {}),
+            "retrieval_route": state.get("retrieval_route", "judgment_priority"),
+            "retrieval_query_variants": state.get("retrieval_query_variants", []),
             "retrieved_passages": state.get("retrieved_passages", []),
             "advisor": advisor_output,
             "structured_response": structured,
+            "missing_facts_followups": structured.get("missing_facts_followups", []),
+            "section_citations": structured.get("section_citations", {}),
             "safety": safety_output.model_dump(),
             "tts_summary": structured.get("tts_summary", ""),
             "final_text": self._compose_final_text(structured=structured, safety=safety_output),
@@ -618,8 +649,110 @@ class VeridictionGraph:
 
         if safety.risk_flags:
             lines.append(f"Risk flags: {', '.join(safety.risk_flags)}")
+
+        followups = structured.get("missing_facts_followups", []) or []
+        if followups:
+            lines.append("Follow-up questions:")
+            for q in followups[:4]:
+                lines.append(f"- {q}")
+
         lines.append(safety.disclaimer)
         return "\n".join(lines)
+
+    def _missing_facts_followups(self, query: str, claim: dict[str, Any]) -> list[str]:
+        claim_type = str(claim.get("claim_type", "other"))
+        lowered = query.lower()
+
+        generic = [
+            "What exact date and location did the key incident occur?",
+            "Who are the involved parties and their relationship to you?",
+            "Do you already have any written complaint, notice, or FIR reference number?",
+        ]
+
+        per_claim: dict[str, list[str]] = {
+            "domestic_violence": [
+                "Are there recent threats or injuries requiring immediate police or medical help?",
+                "Do you have medical reports, photos, chats, or witness details?",
+                "Do you need immediate shelter or protection order support?",
+            ],
+            "police_harassment": [
+                "Which police station and officers were involved?",
+                "Was any written refusal to register FIR given?",
+                "Do you have call logs, recordings, or witness names for misconduct?",
+            ],
+            "unpaid_wages": [
+                "What is the exact salary due amount and period pending?",
+                "Do you have salary slips, bank statements, and appointment proof?",
+                "Did you send a written demand/notice to the employer?",
+            ],
+            "tenant_rights": [
+                "Do you have rent agreement, rent receipts, and deposit payment proof?",
+                "Was any eviction notice served and with what timeline?",
+                "Are utilities access or lockout actions currently happening?",
+            ],
+        }
+
+        followups = list(generic)
+        followups.extend(per_claim.get(claim_type, []))
+
+        if not any(token in lowered for token in ("date", "day", "month", "year")):
+            followups.append("Please share the complete timeline with dates in chronological order.")
+        if not any(token in lowered for token in ("document", "proof", "evidence", "record")):
+            followups.append("What documents or digital evidence can you share right now?")
+
+        # Preserve order while deduplicating and keep concise.
+        unique: list[str] = []
+        seen: set[str] = set()
+        for item in followups:
+            key = item.lower().strip()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        return unique[:6]
+
+    def _section_citations(self, passages: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        def _cite(item: dict[str, Any]) -> dict[str, Any]:
+            metadata = dict(item.get("metadata", {}) or {})
+            dataset = str(metadata.get("dataset", ""))
+            source_label = str(metadata.get("source_label", "Judgment Index"))
+            snippet = str(item.get("passage", "")).replace("\n", " ").strip()
+            return {
+                "source_label": source_label,
+                "dataset": dataset,
+                "score": round(float(item.get("score", 0.0)), 4),
+                "snippet": snippet[:320] + ("..." if len(snippet) > 320 else ""),
+            }
+
+        ranked = sorted(passages, key=lambda x: float(x.get("score", 0.0)), reverse=True)
+        top = ranked[:6]
+
+        buckets: dict[str, list[dict[str, Any]]] = {
+            "case_scenario": [],
+            "possible_steps": [],
+            "required_documentation": [],
+            "courts_and_filing_process": [],
+        }
+
+        for idx, item in enumerate(top):
+            citation = _cite(item)
+            if idx < 2:
+                buckets["case_scenario"].append(citation)
+
+            text = str(item.get("passage", "")).lower()
+            if any(token in text for token in ("step", "process", "file", "complaint", "petition")):
+                buckets["possible_steps"].append(citation)
+            if any(token in text for token in ("document", "evidence", "proof", "records", "receipt")):
+                buckets["required_documentation"].append(citation)
+            if any(token in text for token in ("court", "forum", "jurisdiction", "magistrate", "tribunal")):
+                buckets["courts_and_filing_process"].append(citation)
+
+        for key in buckets:
+            if not buckets[key] and top:
+                buckets[key] = [_cite(top[0])]
+            buckets[key] = buckets[key][:2]
+
+        return buckets
 
     def run(self, user_query: str) -> dict[str, Any]:
         initial_state: VeridictionState = {"user_query": user_query}

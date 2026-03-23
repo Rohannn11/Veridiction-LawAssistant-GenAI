@@ -125,11 +125,17 @@ def _build_structured_json(output: Dict[str, Any], elapsed_ms: float) -> Dict[st
             "claim_type": output.get("claim_type", "other"),
             "urgency": output.get("urgency", "low"),
             "confidence": output.get("confidence", 0.0),
+            "intent_labels": output.get("intent_labels", []),
+            "intent_scores": output.get("intent_scores", {}),
         },
         "retrieval": {
             "passages": passages,
+            "route": output.get("retrieval_route", "judgment_priority"),
+            "query_variants": output.get("retrieval_query_variants", []),
         },
         "structured_response": structured_response,
+        "missing_facts_followups": output.get("missing_facts_followups", []),
+        "section_citations": output.get("section_citations", {}),
         "safety": {
             "risk_flags": safety.get("risk_flags", []),
             "safe_next_steps": safety.get("safe_next_steps", []),
@@ -861,6 +867,12 @@ def run_pipeline(
         "claim_type": str(output.get("claim_type", "other")),
         "urgency": str(output.get("urgency", "low")),
         "confidence": float(output.get("confidence", 0.0)),
+        "intent_labels": list(output.get("intent_labels", []) or []),
+        "intent_scores": dict(output.get("intent_scores", {}) or {}),
+        "retrieval_route": str(output.get("retrieval_route", "judgment_priority")),
+        "retrieval_query_variants": list(output.get("retrieval_query_variants", []) or []),
+        "missing_facts_followups": list(output.get("missing_facts_followups", []) or []),
+        "section_citations": dict(output.get("section_citations", {}) or {}),
         "final_text": str(output.get("final_text", "")),
         "case_scenario_text": case_scenario_text,
         "possible_steps_text": possible_steps_text,
@@ -1264,6 +1276,16 @@ def _render_tabs(result: Dict[str, Any]) -> None:
         _render_section_panel("Transcript / Final Query", result.get("transcript", ""))
         _render_section_panel("Final Advisor Text", result.get("final_text", ""))
         _render_section_panel("Case Scenario", result.get("case_scenario_text", ""))
+        intent_labels = list(result.get("intent_labels", []) or [])
+        intent_scores = dict(result.get("intent_scores", {}) or {})
+        if intent_labels or intent_scores:
+            st.subheader("Intent Signals")
+            if intent_labels:
+                st.markdown("Top intents: " + ", ".join(intent_labels))
+            if intent_scores:
+                ranked = sorted(intent_scores.items(), key=lambda kv: float(kv[1]), reverse=True)
+                for name, score in ranked[:5]:
+                    st.markdown(f"- {name}: {float(score):.2f}")
 
     with tabs[1]:
         _render_section_panel("Possible Steps", result.get("possible_steps_text", ""))
@@ -1272,6 +1294,12 @@ def _render_tabs(result: Dict[str, Any]) -> None:
             st.markdown("Flow Translation:")
             for line in explanation_lines:
                 st.markdown(f"- {line}")
+
+        followups = list(result.get("missing_facts_followups", []) or [])
+        if followups:
+            st.subheader("Missing Facts: Follow-up Questions")
+            for idx, question in enumerate(followups, start=1):
+                st.markdown(f"{idx}. {question}")
 
     with tabs[2]:
         _render_section_panel("Required Documentation (Evidence)", result.get("required_docs_text", ""))
@@ -1343,11 +1371,34 @@ def _render_tabs(result: Dict[str, Any]) -> None:
             st.info(disclaimer)
 
     with tabs[6]:
+        route = str(result.get("retrieval_route", "judgment_priority"))
+        st.markdown(f"Retrieval route: {route}")
+        variants = list(result.get("retrieval_query_variants", []) or [])
+        if variants:
+            with st.expander("Query Variants Used", expanded=False):
+                for v in variants:
+                    st.markdown(f"- {v}")
+
         table = result.get("passage_table", [])
         if table:
             st.dataframe(table, use_container_width=True)
         else:
             st.write("No passages returned.")
+
+        citations = dict(result.get("section_citations", {}) or {})
+        if citations:
+            st.subheader("Section Citations")
+            for section, refs in citations.items():
+                pretty_section = str(section).replace("_", " ").title()
+                with st.expander(pretty_section, expanded=False):
+                    for ref in list(refs or [])[:3]:
+                        label = str(ref.get("source_label", "Source")).strip()
+                        dataset = str(ref.get("dataset", "")).strip()
+                        score = float(ref.get("score", 0.0))
+                        snippet = str(ref.get("snippet", "")).strip()
+                        st.markdown(f"- {label} | {dataset} | score={score:.3f}")
+                        if snippet:
+                            st.caption(snippet)
 
     with tabs[7]:
         st.code(result.get("structured_json", "{}"), language="json")

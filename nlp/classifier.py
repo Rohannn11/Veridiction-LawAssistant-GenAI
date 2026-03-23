@@ -45,6 +45,8 @@ class ClaimResult:
     urgency: str
     confidence: float
     rationale_short: str
+    intent_labels: list[str]
+    intent_scores: dict[str, float]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -52,6 +54,8 @@ class ClaimResult:
             "urgency": self.urgency,
             "confidence": round(self.confidence, 4),
             "rationale_short": self.rationale_short,
+            "intent_labels": self.intent_labels,
+            "intent_scores": {k: round(v, 4) for k, v in self.intent_scores.items()},
         }
 
 
@@ -168,6 +172,66 @@ class ClaimClassifier:
         "non payment",
     )
 
+    INTENT_PATTERNS: dict[str, tuple[str, ...]] = {
+        "procedural": (
+            "how",
+            "procedure",
+            "process",
+            "steps",
+            "file",
+            "filing",
+            "complaint",
+            "petition",
+            "what should i do",
+            "next",
+        ),
+        "evidence": (
+            "evidence",
+            "proof",
+            "document",
+            "documents",
+            "record",
+            "recording",
+            "witness",
+            "receipt",
+            "contract",
+            "screenshot",
+        ),
+        "forum": (
+            "which court",
+            "where to file",
+            "forum",
+            "jurisdiction",
+            "police station",
+            "magistrate",
+            "consumer court",
+            "labour court",
+            "family court",
+        ),
+        "timeline": (
+            "when",
+            "deadline",
+            "time limit",
+            "limitation",
+            "how long",
+            "urgent",
+            "immediately",
+            "today",
+            "tonight",
+        ),
+        "relief": (
+            "compensation",
+            "refund",
+            "maintenance",
+            "injunction",
+            "bail",
+            "stay order",
+            "protection order",
+            "reinstatement",
+            "damages",
+        ),
+    }
+
     def __init__(self, config: ClassifierConfig | None = None) -> None:
         self.config = config or ClassifierConfig()
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -197,12 +261,16 @@ class ClaimClassifier:
 
             urgency = self._detect_urgency(text, best_label)
             rationale = self._build_rationale(best_label, keyword_scores, embedding_scores)
+            intent_scores = self._intent_scores(text=text, claim_type=best_label, urgency=urgency)
+            intent_labels = self._intent_labels(intent_scores)
 
             result = ClaimResult(
                 claim_type=best_label,
                 urgency=urgency,
                 confidence=float(best_score),
                 rationale_short=rationale,
+                intent_labels=intent_labels,
+                intent_scores=intent_scores,
             )
             return result.to_dict()
         except Exception as exc:  # pragma: no cover
@@ -279,6 +347,40 @@ class ClaimClassifier:
             f"(keyword={keyword_scores.get(claim_type, 0.0):.2f}, "
             f"embedding={embedding_scores.get(claim_type, 0.0):.2f})."
         )
+
+    def _intent_scores(self, text: str, claim_type: str, urgency: str) -> dict[str, float]:
+        lowered = text.lower()
+        scores: dict[str, float] = {}
+
+        for intent, patterns in self.INTENT_PATTERNS.items():
+            hits = 0
+            for pattern in patterns:
+                if re.search(rf"\b{re.escape(pattern)}\b", lowered):
+                    hits += 1
+            base = hits / max(1, len(patterns))
+            scores[intent] = min(1.0, base * 2.6)
+
+        if claim_type in {"domestic_violence", "police_harassment"}:
+            scores["timeline"] = max(scores.get("timeline", 0.0), 0.55)
+            scores["relief"] = max(scores.get("relief", 0.0), 0.45)
+
+        if claim_type in {"property_dispute", "tenant_rights", "wrongful_termination"}:
+            scores["forum"] = max(scores.get("forum", 0.0), 0.35)
+
+        if urgency == "high":
+            scores["timeline"] = max(scores.get("timeline", 0.0), 0.7)
+
+        if all(v <= 0.0 for v in scores.values()):
+            scores["procedural"] = 0.4
+
+        return scores
+
+    def _intent_labels(self, intent_scores: dict[str, float]) -> list[str]:
+        ranked = sorted(intent_scores.items(), key=lambda item: item[1], reverse=True)
+        labels = [name for name, score in ranked if score >= 0.34]
+        if not labels and ranked:
+            labels = [ranked[0][0]]
+        return labels[:3]
 
 
 def _build_cli() -> argparse.ArgumentParser:

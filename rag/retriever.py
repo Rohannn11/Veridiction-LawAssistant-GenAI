@@ -210,6 +210,7 @@ class LegalRetriever:
 
         similarity_top_k = top_k if top_k is not None else self.config.top_k
         procedural_intent = self._is_procedural_intent(user_query)
+        rewritten_queries = self._rewrite_queries(user_query, procedural_intent=procedural_intent)
 
         if procedural_intent:
             procedural_k = max(2, similarity_top_k)
@@ -218,8 +219,24 @@ class LegalRetriever:
             procedural_k = max(1, similarity_top_k // 2)
             judgment_k = max(2, similarity_top_k)
 
-        judgment_results = self._query_judgment_index(user_query=user_query, top_k=judgment_k)
-        procedural_results = self._query_procedural_index(user_query=user_query, top_k=procedural_k)
+        judgment_results: list[dict[str, Any]] = []
+        procedural_results: list[dict[str, Any]] = []
+
+        for idx, rewritten in enumerate(rewritten_queries):
+            query_bias = 0.04 if idx == 0 else 0.0
+            for item in self._query_judgment_index(user_query=rewritten, top_k=judgment_k):
+                with_bias = dict(item)
+                with_bias["score"] = min(1.0, float(item.get("score", 0.0)) + query_bias)
+                with_bias["rewrite_query"] = rewritten
+                with_bias["rewrite_rank"] = idx
+                judgment_results.append(with_bias)
+
+            for item in self._query_procedural_index(user_query=rewritten, top_k=procedural_k):
+                with_bias = dict(item)
+                with_bias["score"] = min(1.0, float(item.get("score", 0.0)) + query_bias)
+                with_bias["rewrite_query"] = rewritten
+                with_bias["rewrite_rank"] = idx
+                procedural_results.append(with_bias)
 
         merged = self._merge_dual_results(
             query=user_query,
@@ -227,12 +244,42 @@ class LegalRetriever:
             procedural_results=procedural_results,
             top_k=similarity_top_k,
             procedural_intent=procedural_intent,
+            rewritten_queries=rewritten_queries,
         )
         return merged
 
     def _is_procedural_intent(self, query: str) -> bool:
         lowered = query.lower()
         return any(token in lowered for token in PROCEDURAL_INTENT_KEYWORDS)
+
+    def _rewrite_queries(self, query: str, procedural_intent: bool) -> list[str]:
+        base = " ".join(query.split()).strip()
+        if not base:
+            return [query]
+
+        lowered = base.lower()
+        rewrites = [base]
+
+        if procedural_intent:
+            rewrites.append(f"{base}. What are the filing steps, forum, and required documents in Maharashtra?")
+        else:
+            rewrites.append(f"{base}. Relevant Indian legal precedents and remedies.")
+
+        if "maharashtra" not in lowered:
+            rewrites.append(f"Maharashtra legal process for: {base}")
+
+        if not any(token in lowered for token in ("document", "evidence", "proof")):
+            rewrites.append(f"Evidence and documents needed for: {base}")
+
+        unique: list[str] = []
+        seen: set[str] = set()
+        for candidate in rewrites:
+            key = candidate.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(candidate)
+        return unique[:3]
 
     def _query_judgment_index(self, user_query: str, top_k: int) -> list[dict[str, Any]]:
         if self._judgment_index is None:
@@ -316,9 +363,11 @@ class LegalRetriever:
         procedural_results: list[dict[str, Any]],
         top_k: int,
         procedural_intent: bool,
+        rewritten_queries: list[str],
     ) -> list[dict[str, Any]]:
         merged: list[dict[str, Any]] = []
         seen: set[str] = set()
+        source_counts: dict[str, int] = {"judgment_index": 0, "procedural_index": 0}
 
         def _add(items: list[dict[str, Any]], source_bias: float = 0.0) -> None:
             for item in items:
@@ -330,11 +379,18 @@ class LegalRetriever:
                     continue
                 seen.add(key)
                 score = float(item.get("score", 0.0)) + source_bias
+                metadata = dict(item.get("metadata", {}) or {})
+                source_index = str(metadata.get("source_index", "judgment_index"))
+                if source_counts.get(source_index, 0) >= max(1, top_k // 2):
+                    score -= 0.07
                 merged.append({
                     "passage": passage,
-                    "metadata": item.get("metadata", {}) or {},
+                    "metadata": metadata,
                     "score": min(score, 1.0),
+                    "rewrite_query": str(item.get("rewrite_query", query)),
+                    "rewrite_rank": int(item.get("rewrite_rank", 0)),
                 })
+                source_counts[source_index] = source_counts.get(source_index, 0) + 1
 
         if procedural_intent:
             _add(procedural_results, source_bias=0.08)
@@ -343,8 +399,59 @@ class LegalRetriever:
             _add(judgment_results, source_bias=0.05)
             _add(procedural_results, source_bias=0.0)
 
+        merged = self._rerank_with_diversity(merged, top_k=max(1, top_k))
+
+        route_label = "procedural_priority" if procedural_intent else "judgment_priority"
+        query_variants = "; ".join(rewritten_queries)
+        for item in merged:
+            metadata = dict(item.get("metadata", {}) or {})
+            metadata["retrieval_route"] = route_label
+            metadata["query_variants"] = query_variants
+            item["metadata"] = metadata
+
         merged = sorted(merged, key=lambda x: float(x.get("score", 0.0)), reverse=True)
         return merged[:max(1, top_k)]
+
+    def _rerank_with_diversity(self, items: list[dict[str, Any]], top_k: int) -> list[dict[str, Any]]:
+        if not items:
+            return items
+
+        ranked = sorted(items, key=lambda x: float(x.get("score", 0.0)), reverse=True)
+        selected: list[dict[str, Any]] = []
+        seen_signatures: set[str] = set()
+
+        for item in ranked:
+            passage = str(item.get("passage", "")).lower()
+            words = [w for w in re.findall(r"\b\w+\b", passage) if len(w) > 3]
+            signature = " ".join(words[:10])
+            if signature and signature in seen_signatures:
+                continue
+
+            metadata = item.get("metadata", {}) or {}
+            source = str(metadata.get("source_index", ""))
+            if source:
+                same_source = sum(
+                    1 for s in selected if str((s.get("metadata", {}) or {}).get("source_index", "")) == source
+                )
+                if same_source >= max(1, top_k // 2):
+                    continue
+
+            selected.append(item)
+            if signature:
+                seen_signatures.add(signature)
+            if len(selected) >= top_k:
+                break
+
+        if len(selected) < top_k:
+            selected_keys = {id(x) for x in selected}
+            for item in ranked:
+                if id(item) in selected_keys:
+                    continue
+                selected.append(item)
+                if len(selected) >= top_k:
+                    break
+
+        return selected
     
     def _calibrate_scores(self, nodes: list) -> list:
         """Normalize scores to 0.80-0.95 range for high-quality results."""
