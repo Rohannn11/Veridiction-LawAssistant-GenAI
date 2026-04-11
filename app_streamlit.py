@@ -123,6 +123,8 @@ def _build_structured_json(output: Dict[str, Any], elapsed_ms: float) -> Dict[st
         },
         "classification": {
             "claim_type": output.get("claim_type", "other"),
+            "secondary_claim_types": output.get("secondary_claim_types", []),
+            "hybrid_claim_types": output.get("hybrid_claim_types", []),
             "urgency": output.get("urgency", "low"),
             "confidence": output.get("confidence", 0.0),
             "intent_labels": output.get("intent_labels", []),
@@ -588,7 +590,9 @@ def _build_dynamic_tts_summary(output: Dict[str, Any], transcript: str) -> str:
     else:
         emergency_text = "Emergency support: call 112 if there is immediate danger"
 
-    claim = str(output.get("claim_type", "legal issue")).replace("_", " ")
+    primary_claim = str(output.get("claim_type", "legal issue")).replace("_", " ")
+    secondary_claims = [str(x).replace("_", " ") for x in list(output.get("secondary_claim_types", []) or [])]
+    claim = ", ".join([primary_claim] + secondary_claims) if secondary_claims else primary_claim
     return (
         f"For your {claim} case, here is what to do now. "
         f"Next steps: {next_steps_text}. "
@@ -865,8 +869,11 @@ def run_pipeline(
     return {
         "transcript": transcript,
         "claim_type": str(output.get("claim_type", "other")),
+        "secondary_claim_types": list(output.get("secondary_claim_types", []) or []),
+        "hybrid_claim_types": list(output.get("hybrid_claim_types", []) or []),
         "urgency": str(output.get("urgency", "low")),
         "confidence": float(output.get("confidence", 0.0)),
+        "latency_ms": float(elapsed_ms),
         "intent_labels": list(output.get("intent_labels", []) or []),
         "intent_scores": dict(output.get("intent_scores", {}) or {}),
         "retrieval_route": str(output.get("retrieval_route", "judgment_priority")),
@@ -902,12 +909,28 @@ def run_pipeline(
 
 
 def _render_status_panel(result: Dict[str, Any]) -> None:
-    st.subheader("Run Summary")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Claim Type", result.get("claim_type", ""))
-    c2.metric("Urgency", result.get("urgency", ""))
-    c3.metric("Confidence", f"{result.get('confidence', 0.0):.3f}")
-    st.write(result.get("status", ""))
+    primary_claim = str(result.get("claim_type", "")).replace("_", " ").title()
+    secondary = [str(x).replace("_", " ").title() for x in list(result.get("secondary_claim_types", []) or [])]
+    hybrid_label = " + ".join([primary_claim] + secondary) if primary_claim else "Unclassified"
+    urgency = str(result.get("urgency", "")).strip().title() or "Not Set"
+    confidence = float(result.get("confidence", 0.0))
+    latency_ms = float(result.get("latency_ms", 0.0))
+
+    st.markdown(
+        (
+            "<div class='va-run-summary'>"
+            "<div class='va-run-title'>Run Summary</div>"
+            "<div class='va-run-grid'>"
+            f"<div class='va-run-card'><div class='va-run-label'>Primary Claim</div><div class='va-run-value'>{escape(primary_claim or 'Unclassified')}</div></div>"
+            f"<div class='va-run-card'><div class='va-run-label'>Hybrid Coverage</div><div class='va-run-value va-run-hybrid'>{escape(hybrid_label)}</div></div>"
+            f"<div class='va-run-card'><div class='va-run-label'>Urgency</div><div class='va-run-value'>{escape(urgency)}</div></div>"
+            f"<div class='va-run-card'><div class='va-run-label'>Confidence</div><div class='va-run-value'>{confidence:.3f}</div></div>"
+            "</div>"
+            f"<div class='va-run-status'>{escape(str(result.get('status', '')))} | Latency: {latency_ms:.1f} ms</div>"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
 
 
 def _inject_theme() -> None:
@@ -963,6 +986,51 @@ def _inject_theme() -> None:
 .va-badge-low { background: #dcfce7; color: #14532d; border-color: #16a34a; }
 .va-badge-medium { background: #fef3c7; color: #92400e; border-color: #d97706; }
 .va-badge-high { background: #fee2e2; color: #7f1d1d; border-color: #dc2626; }
+.va-run-summary {
+    border: 1px solid #cbd5e1;
+    border-radius: 14px;
+    background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+    padding: 12px 14px;
+    margin-bottom: 12px;
+}
+.va-run-title {
+    font-size: 19px;
+    font-weight: 800;
+    color: #0f172a;
+    margin-bottom: 10px;
+}
+.va-run-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px;
+}
+.va-run-card {
+    border: 1px solid #dbe4ef;
+    border-radius: 10px;
+    background: #ffffff;
+    padding: 10px;
+}
+.va-run-label {
+    font-size: 12px;
+    color: #64748b;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+}
+.va-run-value {
+    font-size: 22px;
+    font-weight: 800;
+    color: #0f172a;
+    line-height: 1.2;
+}
+.va-run-value.va-run-hybrid {
+    font-size: 16px;
+}
+.va-run-status {
+    margin-top: 10px;
+    font-size: 13px;
+    color: #334155;
+}
 .va-panel {
     border: 1px solid #d1d5db;
     border-radius: 12px;
@@ -1047,6 +1115,8 @@ def _render_hero_summary(result: Dict[str, Any]) -> None:
     severity = str(result.get("severity_level", "")).strip() or "not set"
     urgency = str(result.get("urgency", "")).strip() or "not set"
     claim = str(result.get("claim_type", "")).replace("_", " ").title() or "Unclassified"
+    secondary_claims = [str(x).replace("_", " ").title() for x in list(result.get("secondary_claim_types", []) or [])]
+    hybrid_claim = " + ".join([claim] + secondary_claims) if secondary_claims else claim
     risk_flags = list(result.get("risk_flags", []) or [])
     risk_count = len(risk_flags)
     headline = str(result.get("tts_summary_text", "")).strip() or str(result.get("final_text", "")).strip()
@@ -1058,7 +1128,8 @@ def _render_hero_summary(result: Dict[str, Any]) -> None:
             "<div class='va-hero'>"
             "<div class='va-hero-title'>Case Snapshot</div>"
             f"<div class='va-badge-row'>"
-            f"<span class='va-badge va-badge-neutral'>Claim: {escape(claim)}</span>"
+            f"<span class='va-badge va-badge-neutral'>Primary: {escape(claim)}</span>"
+            f"<span class='va-badge va-badge-neutral'>Hybrid: {escape(hybrid_claim)}</span>"
             f"<span class='va-badge {_badge_class(severity)}'>Severity: {escape(severity.title())}</span>"
             f"<span class='va-badge {_badge_class(urgency)}'>Urgency: {escape(urgency.title())}</span>"
             f"<span class='va-badge {'va-badge-high' if risk_count else 'va-badge-low'}'>Risk Flags: {risk_count}</span>"

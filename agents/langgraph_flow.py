@@ -262,8 +262,9 @@ class StructuredAdvisor:
         self.grok = GrokClient()
 
     def generate(self, query: str, claim: dict[str, Any], passages: list[dict[str, Any]]) -> StructuredLegalOutput:
-        claim_type = claim.get("claim_type", "other")
-        mapping = self.knowledge.claim_mapping(claim_type)
+        claim_types = self._claim_types_from_claim(claim)
+        claim_type = claim_types[0] if claim_types else "other"
+        mapping = self._merge_claim_mappings(claim_types)
         top_score = max((float(p.get("score", 0.0)) for p in passages), default=0.0)
         low_grounding = not passages or top_score < 0.84
 
@@ -290,6 +291,39 @@ class StructuredAdvisor:
             )
         return response
 
+    def _claim_types_from_claim(self, claim: dict[str, Any]) -> list[str]:
+        primary = str(claim.get("claim_type", "other")).strip() or "other"
+        secondaries_raw = claim.get("secondary_claim_types", []) or []
+        secondaries = [str(item).strip() for item in secondaries_raw if str(item).strip()]
+
+        ordered = [primary] + secondaries[:2]
+        unique: list[str] = []
+        seen: set[str] = set()
+        for label in ordered:
+            if label in seen:
+                continue
+            seen.add(label)
+            unique.append(label)
+        return unique
+
+    def _merge_claim_mappings(self, claim_types: list[str]) -> dict[str, Any]:
+        merged: dict[str, Any] = {
+            "courts_forum": [],
+            "application_process": [],
+            "documents_required": [],
+        }
+        for claim_type in claim_types or ["other"]:
+            mapping = self.knowledge.claim_mapping(claim_type)
+            for key in ("courts_forum", "application_process", "documents_required"):
+                values = mapping.get(key, [])
+                if not isinstance(values, list):
+                    continue
+                for value in values:
+                    text = str(value).strip()
+                    if text and text not in merged[key]:
+                        merged[key].append(text)
+        return merged
+
     def _can_use_grok(self) -> bool:
         if self.provider == "fallback":
             return False
@@ -304,11 +338,14 @@ class StructuredAdvisor:
         passages: list[dict[str, Any]],
         mapping: dict[str, Any],
     ) -> StructuredLegalOutput:
-        claim_type = claim.get("claim_type", "other")
+        claim_types = self._claim_types_from_claim(claim)
+        claim_type = claim_types[0] if claim_types else "other"
+        hybrid_label = ", ".join(ct.replace("_", " ") for ct in claim_types)
         urgency = claim.get("urgency", "medium")
 
         key_facts = [
-            f"Detected claim type: {claim_type}",
+            f"Detected primary claim type: {claim_type}",
+            f"Detected combined issues: {hybrid_label}",
             f"Classifier urgency: {urgency}",
             f"User statement: {query[:220]}",
         ]
@@ -336,7 +373,7 @@ class StructuredAdvisor:
 
         severity_level = self._severity_from_claim(claim_type=claim_type, urgency=urgency, query=query)
         severity_rationale = (
-            f"Severity marked as {severity_level} due to claim category '{claim_type}', urgency '{urgency}', "
+            f"Severity marked as {severity_level} due to claim profile '{hybrid_label}', urgency '{urgency}', "
             "and reported risk context."
         )
         time_sensitivity = "Immediate action advised (within hours)." if severity_level in {"high", "critical"} else "Action advised within 24-48 hours."
@@ -350,6 +387,7 @@ class StructuredAdvisor:
         summary = self._tts_summary(
             query=query,
             claim_type=claim_type,
+            claim_types=claim_types,
             urgency=urgency,
             severity_level=severity_level,
             immediate_actions=immediate_actions,
@@ -361,7 +399,10 @@ class StructuredAdvisor:
 
         return StructuredLegalOutput(
             case_scenario=CaseScenario(
-                summary=f"This appears to be a {claim_type.replace('_', ' ')} scenario in Maharashtra requiring structured legal action.",
+                summary=(
+                    f"This appears to be a combined scenario involving {hybrid_label} in Maharashtra "
+                    "requiring parallel legal action tracks."
+                ),
                 key_facts=key_facts,
                 missing_details=missing_details,
             ),
@@ -439,6 +480,7 @@ class StructuredAdvisor:
         self,
         query: str,
         claim_type: str,
+        claim_types: list[str],
         urgency: str,
         severity_level: str,
         immediate_actions: list[str],
@@ -464,9 +506,10 @@ class StructuredAdvisor:
             process_text = "Submit a written complaint to the appropriate authority and track acknowledgement"
 
         emergency_text = "Call 112 immediately if there is physical danger, and use legal aid helplines for urgent support"
+        claim_profile = ", ".join(x.replace("_", " ") for x in claim_types) if claim_types else claim_type.replace("_", " ")
 
         return (
-            f"For your {claim_type.replace('_', ' ')} case, here is what to do now. "
+            f"For your combined {claim_profile} case, here is what to do now. "
             f"Next steps: {steps_text}. "
             f"Keep these documents ready: {docs_text}. "
             f"Process to follow: {process_text}. "
@@ -548,6 +591,10 @@ class VeridictionGraph:
         structured_output = structured.model_dump()
         structured_output["missing_facts_followups"] = self._missing_facts_followups(query=query, claim=claim)
         structured_output["section_citations"] = self._section_citations(passages=passages)
+        structured_output["claim_profile"] = {
+            "primary_claim_type": str(claim.get("claim_type", "other")),
+            "secondary_claim_types": list(claim.get("secondary_claim_types", []) or []),
+        }
         structured_output["retrieval_context"] = {
             "route": retrieval_route,
             "query_variants": query_variants,
@@ -607,6 +654,10 @@ class VeridictionGraph:
 
         final_response = {
             "claim_type": claim.get("claim_type", "other"),
+            "secondary_claim_types": claim.get("secondary_claim_types", []),
+            "hybrid_claim_types": list(
+                dict.fromkeys([claim.get("claim_type", "other")] + list(claim.get("secondary_claim_types", []) or []))
+            ),
             "urgency": claim.get("urgency", "low"),
             "confidence": claim.get("confidence", 0.0),
             "intent_labels": claim.get("intent_labels", []),
@@ -649,11 +700,14 @@ class VeridictionGraph:
 
     def _risk_flags(self, query: str, claim: dict[str, Any]) -> list[str]:
         flags: list[str] = []
+        claim_types = [str(claim.get("claim_type", "other"))] + [
+            str(item) for item in (claim.get("secondary_claim_types", []) or [])
+        ]
         if any(token in query for token in ("danger", "assault", "violence", "threat", "urgent", "tonight")):
             flags.append("immediate_danger")
-        if claim.get("claim_type") == "police_harassment":
+        if "police_harassment" in claim_types:
             flags.append("police_misconduct")
-        if claim.get("claim_type") == "domestic_violence":
+        if "domestic_violence" in claim_types:
             flags.append("domestic_violence_risk")
         if claim.get("urgency") == "high" and "high_urgency" not in flags:
             flags.append("high_urgency")
@@ -720,6 +774,7 @@ class VeridictionGraph:
 
     def _missing_facts_followups(self, query: str, claim: dict[str, Any]) -> list[str]:
         claim_type = str(claim.get("claim_type", "other"))
+        secondary_claim_types = [str(item) for item in (claim.get("secondary_claim_types", []) or [])]
         lowered = query.lower()
 
         generic = [
@@ -753,6 +808,8 @@ class VeridictionGraph:
 
         followups = list(generic)
         followups.extend(per_claim.get(claim_type, []))
+        for secondary in secondary_claim_types[:2]:
+            followups.extend(per_claim.get(secondary, []))
 
         if not any(token in lowered for token in ("date", "day", "month", "year")):
             followups.append("Please share the complete timeline with dates in chronological order.")
