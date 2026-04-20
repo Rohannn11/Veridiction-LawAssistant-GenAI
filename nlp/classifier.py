@@ -18,6 +18,8 @@ import torch
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.util import cos_sim
 
+from nlp.text_processing import prepare_text_features
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -48,6 +50,9 @@ class ClaimResult:
     secondary_claim_types: list[str]
     intent_labels: list[str]
     intent_scores: dict[str, float]
+    normalized_query: str
+    lemmatized_query: str
+    named_entities: dict[str, list[str]]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -58,6 +63,9 @@ class ClaimResult:
             "secondary_claim_types": self.secondary_claim_types,
             "intent_labels": self.intent_labels,
             "intent_scores": {k: round(v, 4) for k, v in self.intent_scores.items()},
+            "normalized_query": self.normalized_query,
+            "lemmatized_query": self.lemmatized_query,
+            "named_entities": self.named_entities,
         }
 
 
@@ -300,20 +308,25 @@ class ClaimClassifier:
 
         text = query.strip()
         try:
-            keyword_scores = self._keyword_scores(text)
-            embedding_scores = self._embedding_scores(text)
+            features = prepare_text_features(text)
+            normalized_text = str(features.get("normalized_text", text))
+            lemmatized_text = str(features.get("lemmatized_text", normalized_text))
+            named_entities = dict(features.get("named_entities", {}) or {})
+
+            keyword_scores = self._keyword_scores(lemmatized_text)
+            embedding_scores = self._embedding_scores(normalized_text)
             combined_scores = self._combine_scores(keyword_scores, embedding_scores)
 
             best_label, best_score = max(combined_scores.items(), key=lambda item: item[1])
             if best_score < self.config.min_confidence:
                 best_label = self.config.fallback_claim_type
 
-            best_label = self._apply_priority_overrides(text=text, best_label=best_label)
+            best_label = self._apply_priority_overrides(text=lemmatized_text, best_label=best_label)
             secondary_claims = self._secondary_claim_types(combined_scores, best_label)
 
-            urgency = self._detect_urgency(text, best_label)
+            urgency = self._detect_urgency(lemmatized_text, best_label)
             rationale = self._build_rationale(best_label, keyword_scores, embedding_scores)
-            intent_scores = self._intent_scores(text=text, claim_type=best_label, urgency=urgency)
+            intent_scores = self._intent_scores(text=lemmatized_text, claim_type=best_label, urgency=urgency)
             intent_labels = self._intent_labels(intent_scores)
 
             result = ClaimResult(
@@ -324,6 +337,9 @@ class ClaimClassifier:
                 secondary_claim_types=secondary_claims,
                 intent_labels=intent_labels,
                 intent_scores=intent_scores,
+                normalized_query=normalized_text,
+                lemmatized_query=lemmatized_text,
+                named_entities=named_entities,
             )
             return result.to_dict()
         except Exception as exc:  # pragma: no cover

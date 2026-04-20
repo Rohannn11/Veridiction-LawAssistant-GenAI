@@ -349,6 +349,11 @@ class StructuredAdvisor:
             f"Classifier urgency: {urgency}",
             f"User statement: {query[:220]}",
         ]
+        entities = dict(claim.get("named_entities", {}) or {})
+        if entities:
+            summary_parts = [f"{label}={', '.join(values[:2])}" for label, values in entities.items() if values]
+            if summary_parts:
+                key_facts.append("Extracted entities: " + "; ".join(summary_parts[:4]))
         if passages:
             key_facts.append("Retrieved legal references support this category.")
 
@@ -594,6 +599,9 @@ class VeridictionGraph:
         structured_output["claim_profile"] = {
             "primary_claim_type": str(claim.get("claim_type", "other")),
             "secondary_claim_types": list(claim.get("secondary_claim_types", []) or []),
+            "normalized_query": str(claim.get("normalized_query", "")),
+            "lemmatized_query": str(claim.get("lemmatized_query", "")),
+            "named_entities": dict(claim.get("named_entities", {}) or {}),
         }
         structured_output["retrieval_context"] = {
             "route": retrieval_route,
@@ -658,6 +666,9 @@ class VeridictionGraph:
             "hybrid_claim_types": list(
                 dict.fromkeys([claim.get("claim_type", "other")] + list(claim.get("secondary_claim_types", []) or []))
             ),
+            "normalized_query": claim.get("normalized_query", ""),
+            "lemmatized_query": claim.get("lemmatized_query", ""),
+            "named_entities": claim.get("named_entities", {}),
             "urgency": claim.get("urgency", "low"),
             "confidence": claim.get("confidence", 0.0),
             "intent_labels": claim.get("intent_labels", []),

@@ -216,6 +216,9 @@ def _build_structured_json(output: dict[str, Any], elapsed_ms: float) -> dict[st
         },
         "classification": {
             "claim_type": output.get("claim_type", "other"),
+            "normalized_query": output.get("normalized_query", ""),
+            "lemmatized_query": output.get("lemmatized_query", ""),
+            "named_entities": output.get("named_entities", {}),
             "urgency": output.get("urgency", "low"),
             "confidence": output.get("confidence", 0.0),
         },

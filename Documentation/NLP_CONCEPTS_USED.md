@@ -6,6 +6,7 @@ This document is only about NLP/GenAI concepts used in this project and the reas
 
 It covers concepts implemented across:
 - nlp/classifier.py
+- nlp/text_processing.py
 - rag/retriever.py
 - agents/langgraph_flow.py
 - audio/transcriber.py
@@ -60,7 +61,49 @@ $$
 
 ---
 
-## 3. Prototype-Based Semantic Labeling
+## 3. Text Normalization and Lemmatization
+
+## Concept
+Before scoring/retrieval routing, user text is normalized and lemmatized to reduce surface-form variance.
+
+## Where it is used
+- nlp/text_processing.py
+- nlp/classifier.py
+- rag/retriever.py
+
+## Why it is used
+- Improves robustness against inflectional and formatting variation (for example wages/wage, fired/firing).
+- Stabilizes keyword and intent matching.
+
+---
+
+## 4. Lightweight Legal Named Entity Recognition (NER)
+
+## Concept
+Rule-based legal NER extracts high-value entities from user queries.
+
+## Where it is used
+- nlp/text_processing.py
+- nlp/classifier.py (entities included in classification payload)
+- rag/retriever.py (entities persisted in retrieval metadata)
+- agents/langgraph_flow.py (entities exposed in final response and claim profile)
+
+## Entity categories extracted
+- date
+- money
+- phone
+- fir_reference
+- legal_reference
+- authority
+- location
+
+## Why it is used
+- Captures critical legal facts for explainability and triage quality.
+- Supports downstream follow-up logic and output transparency.
+
+---
+
+## 5. Prototype-Based Semantic Labeling
 
 ## Concept
 A query is compared against fixed label prototypes encoded as sentence vectors; the nearest prototype guides class selection.
@@ -74,7 +117,7 @@ A query is compared against fixed label prototypes encoded as sentence vectors; 
 
 ---
 
-## 4. Intent Detection as Multi-Label Signal
+## 6. Intent Detection as Multi-Label Signal
 
 ## Concept
 Intent extraction identifies user objective dimensions (not just case type), such as procedural help or document help.
@@ -95,7 +138,7 @@ Intent extraction identifies user objective dimensions (not just case type), suc
 
 ---
 
-## 5. Urgency Detection (Risk-Aware Lexical Inference)
+## 7. Urgency Detection (Risk-Aware Lexical Inference)
 
 ## Concept
 Urgency classification detects temporal/risk criticality using lexical patterns and case context.
@@ -110,7 +153,7 @@ Urgency classification detects temporal/risk criticality using lexical patterns 
 
 ---
 
-## 6. Priority Override Rules for Sensitive Misclassification Cases
+## 8. Priority Override Rules for Sensitive Misclassification Cases
 
 ## Concept
 Post-classification overrides are rule-based corrections for known high-impact edge cases.
@@ -124,7 +167,7 @@ Post-classification overrides are rule-based corrections for known high-impact e
 
 ---
 
-## 7. Dense Retrieval (Vector Similarity Search)
+## 9. Dense Retrieval (Vector Similarity Search)
 
 ## Concept
 Dense retrieval maps queries and legal passages into embedding space and retrieves semantically close passages.
@@ -138,7 +181,7 @@ Dense retrieval maps queries and legal passages into embedding space and retriev
 
 ---
 
-## 8. Retrieval Routing by Procedural Intent
+## 10. Retrieval Routing by Procedural Intent
 
 ## Concept
 Intent-aware retrieval routing chooses between substantive judgments and procedural corpora.
@@ -152,7 +195,7 @@ Intent-aware retrieval routing chooses between substantive judgments and procedu
 
 ---
 
-## 9. Query Rewriting / Expansion
+## 11. Query Rewriting / Expansion
 
 ## Concept
 Query expansion creates multiple semantically related query variants to improve recall.
@@ -166,7 +209,7 @@ Query expansion creates multiple semantically related query variants to improve 
 
 ---
 
-## 10. Lexical Reranking with Phrase Matching
+## 12. Lexical Reranking with Phrase Matching
 
 ## Concept
 After dense retrieval, lexical reranking boosts passages that contain important multi-word phrases.
@@ -180,7 +223,7 @@ After dense retrieval, lexical reranking boosts passages that contain important 
 
 ---
 
-## 11. TF-IDF Weighting in Reranking
+## 13. TF-IDF Weighting in Reranking
 
 ## Concept
 Inverse Document Frequency (IDF) gives higher importance to rarer discriminative terms and lower importance to common terms.
@@ -200,7 +243,7 @@ $$
 
 ---
 
-## 12. Domain Synonym Expansion
+## 14. Domain Synonym Expansion
 
 ## Concept
 Legal synonym mapping expands terms (for example wage -> salary/remuneration/dues).
@@ -214,7 +257,7 @@ Legal synonym mapping expands terms (for example wage -> salary/remuneration/due
 
 ---
 
-## 13. Diversity-Aware Reranking
+## 15. Diversity-Aware Reranking
 
 ## Concept
 Reranking penalizes near-duplicates and source over-concentration to produce a more diverse context bundle.
@@ -228,7 +271,7 @@ Reranking penalizes near-duplicates and source over-concentration to produce a m
 
 ---
 
-## 14. Grounded Generation (RAG-Conditioned Advice)
+## 16. Grounded Generation (RAG-Conditioned Advice)
 
 ## Concept
 Generated legal guidance is conditioned on retrieved passages + structured legal mapping, not only raw user text.
@@ -242,7 +285,7 @@ Generated legal guidance is conditioned on retrieved passages + structured legal
 
 ---
 
-## 15. Schema-Constrained NLG (Structured JSON Output)
+## 17. Schema-Constrained NLG (Structured JSON Output)
 
 ## Concept
 Natural language generation is constrained to a strict schema (case scenario, steps, documents, courts, severity, flowchart, tts summary).
@@ -256,7 +299,7 @@ Natural language generation is constrained to a strict schema (case scenario, st
 
 ---
 
-## 16. Low-Grounding Detection and Controlled Fallback Generation
+## 18. Low-Grounding Detection and Controlled Fallback Generation
 
 ## Concept
 When retrieval confidence is weak, generation mode is adjusted and deterministic fallback is used when needed.
@@ -270,7 +313,7 @@ When retrieval confidence is weak, generation mode is adjusted and deterministic
 
 ---
 
-## 17. Safety-Aware NLP Layer (Risk Flagging + Escalation)
+## 19. Safety-Aware NLP Layer (Risk Flagging + Escalation)
 
 ## Concept
 Rule-driven risk detection augments generated advice with emergency-safe next actions and severity upgrades.
@@ -284,7 +327,7 @@ Rule-driven risk detection augments generated advice with emergency-safe next ac
 
 ---
 
-## 18. Citation Bucketing for Explainable NLP Outputs
+## 20. Citation Bucketing for Explainable NLP Outputs
 
 ## Concept
 Retrieved passages are converted into section-wise citation bundles for explainability.
@@ -298,7 +341,7 @@ Retrieved passages are converted into section-wise citation bundles for explaina
 
 ---
 
-## 19. Follow-Up Question Generation for Missing Facts
+## 21. Follow-Up Question Generation for Missing Facts
 
 ## Concept
 NLP follow-up generation identifies missing case facts and asks focused clarifying questions.
@@ -312,7 +355,7 @@ NLP follow-up generation identifies missing case facts and asks focused clarifyi
 
 ---
 
-## 20. TTS Input Text Normalization (Post-NLP Surface Processing)
+## 22. TTS Input Text Normalization (Post-NLP Surface Processing)
 
 ## Concept
 Before speech synthesis, text is cleaned to remove markdown/control artifacts and normalize whitespace.
@@ -326,18 +369,18 @@ Before speech synthesis, text is cleaned to remove markdown/control artifacts an
 
 ---
 
-## 21. What is NOT used (important clarifier)
+## 23. What is NOT used (important clarifier)
 
 To avoid ambiguity, these are not core implemented NLP methods in the current codebase:
 - No transformer fine-tuning on project-specific legal data.
-- No CRF/sequence-labeling NER pipeline.
+- No heavy neural NER model training/fine-tuning pipeline.
 - No dependency parsing or constituency parsing pipeline.
 - No explicit stemming/lemmatization morphological pipeline.
 - No cross-encoder reranker model; reranking is rule/score-boost based.
 
 ---
 
-## 22. Summary: Why this NLP design works for this project
+## 24. Summary: Why this NLP design works for this project
 
 The project uses a practical hybrid NLP architecture:
 1. ASR converts voice to text.

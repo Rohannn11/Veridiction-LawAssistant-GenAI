@@ -113,8 +113,8 @@ Implementation module:
 - Language identification probability output.
 
 ### Notes on "morphing"
-- There is no linguistic morphology engine (stemming/lemmatization pipeline) in STT.
-- "Morphing-like" processing here refers to signal normalization and segment aggregation, not token morphology.
+- STT itself does signal-level normalization and segment aggregation.
+- Linguistic normalization/lemmatization is applied later in the NLP layer (classifier + retriever preprocessing), not inside ASR decoding.
 
 ---
 
@@ -128,9 +128,11 @@ Implementation module:
    - Rule-based keyword pattern scoring
    - Embedding similarity against claim prototypes
 2. Scores are fused with weighted hybrid logic.
-3. Primary claim type is selected; secondary claim types may be added.
-4. Urgency level is detected.
-5. Intent dimensions are scored and labeled.
+3. Query preprocessing generates normalized text + lemmatized text.
+4. Lightweight legal NER extracts entities (date, money, phone, FIR/legal references, authority, location).
+5. Primary claim type is selected; secondary claim types may be added.
+6. Urgency level is detected.
+7. Intent dimensions are scored and labeled.
 
 ### Supported claim classes
 - unpaid_wages
@@ -150,6 +152,9 @@ Implementation module:
   - Stable semantic matching to prototype descriptions.
 - Regex/rule system:
   - Deterministic legal keyword detection, useful for controllability and explainability.
+- Shared NLP text utilities:
+  - Provide query normalization and lightweight lemmatization for more robust lexical matching.
+  - Provide rule-based legal NER for extracting high-value case entities.
 
 ### Hybrid scoring equation
 The classifier combines rule and semantic signals as:
@@ -171,6 +176,8 @@ Confidence threshold behavior:
 - Prototype-based zero/few-shot style classification.
 - Lexical-rules + semantic fusion (hybrid NLP).
 - Multi-intent tagging (procedural, evidence, forum, timeline, relief).
+- Legal-domain NER entity extraction.
+- Lemmatization/normalization for lexical robustness.
 
 ---
 
@@ -182,13 +189,14 @@ Implementation module:
 ### What happens
 1. Retriever loads or builds vector index over judgment datasets.
 2. Procedural corpus is loaded in streaming/in-memory mode.
-3. Query intent routing chooses retrieval emphasis:
+3. Query preprocessing applies normalization + lemmatization and extracts named entities for traceability.
+4. Query intent routing chooses retrieval emphasis:
    - procedural_priority (for procedural questions)
    - judgment_priority (default)
-4. Query rewrite generation creates expanded variants.
-5. Retrieval runs across one or both routes.
-6. Advanced reranking and score calibration applied.
-7. Top-k merged passages returned with metadata.
+5. Query rewrite generation creates expanded variants.
+6. Retrieval runs across one or both routes.
+7. Advanced reranking and score calibration applied.
+8. Top-k merged passages returned with metadata.
 
 ### Data sources used
 Judgment datasets:
@@ -250,6 +258,8 @@ Where:
 - Hybrid reranking (semantic + lexical + domain synonyms).
 - Query expansion/rewrite for recall improvement.
 - Multi-corpus route-aware retrieval.
+- Lemmatization-aware lexical matching.
+- NER-aware retrieval trace metadata (entities retained with query context).
 
 ---
 

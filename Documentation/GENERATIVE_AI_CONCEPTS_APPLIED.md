@@ -64,7 +64,38 @@ User text and legal corpora are represented in dense vector space so similarity 
 
 ---
 
-## 5. Concept 3: Retrieval-Augmented Generation (RAG)
+## 5. Concept 3: Normalization and Lemmatization as Prompt/Retrieval Stabilizers
+
+## What it is
+User queries are normalized and lightly lemmatized before lexical scoring and routing.
+
+## Where used
+- nlp/text_processing.py
+- nlp/classifier.py
+- rag/retriever.py
+
+## Why used in this system
+- Reduces variation from morphology and noisy user phrasing.
+- Improves consistency of downstream retrieval-conditioning signals.
+
+---
+
+## 6. Concept 4: Legal NER as Fact-Conditioning Signal
+
+## What it is
+Rule-based legal NER extracts case-critical entities such as dates, amounts, legal references, FIR mentions, and authorities.
+
+## Where used
+- nlp/text_processing.py
+- agents/langgraph_flow.py (claim profile and final response exposure)
+
+## Why used in this system
+- Preserves factual anchors that influence safe and practical guidance.
+- Improves explainability and downstream follow-up quality.
+
+---
+
+## 7. Concept 5: Retrieval-Augmented Generation (RAG)
 
 ## What it is
 Generation is grounded using externally retrieved legal passages instead of relying only on model parametric memory.
@@ -85,7 +116,7 @@ Generation is grounded using externally retrieved legal passages instead of rely
 
 ---
 
-## 6. Concept 4: Hybrid Retrieval as a GenAI Grounding Strategy
+## 8. Concept 6: Hybrid Retrieval as a GenAI Grounding Strategy
 
 ## What it is
 Dense retrieval is combined with lexical/phrase/synonym signals to improve context quality before generation.
@@ -107,7 +138,7 @@ Dense retrieval is combined with lexical/phrase/synonym signals to improve conte
 
 ---
 
-## 7. Concept 5: Query Rewriting for Recall Expansion
+## 9. Concept 7: Query Rewriting for Recall Expansion
 
 ## What it is
 The system generates alternate query variants to increase retrieval recall and context coverage.
@@ -126,7 +157,7 @@ The system generates alternate query variants to increase retrieval recall and c
 
 ---
 
-## 8. Concept 6: Route-Aware Retrieval Conditioning
+## 10. Concept 8: Route-Aware Retrieval Conditioning
 
 ## What it is
 The system chooses a retrieval route based on inferred user intent before generation.
@@ -144,7 +175,7 @@ The system chooses a retrieval route based on inferred user intent before genera
 
 ---
 
-## 9. Concept 7: Grounded Structured Generation (Schema-Constrained NLG)
+## 11. Concept 9: Grounded Structured Generation (Schema-Constrained NLG)
 
 ## What it is
 Instead of open-ended text generation, the model is asked to generate strict JSON sections.
@@ -164,7 +195,7 @@ Instead of open-ended text generation, the model is asked to generate strict JSO
 
 ---
 
-## 10. Concept 8: Grounding-Aware Generation Modes
+## 12. Concept 10: Grounding-Aware Generation Modes
 
 ## What it is
 Generation behavior changes when retrieval grounding is weak.
@@ -182,7 +213,7 @@ Generation behavior changes when retrieval grounding is weak.
 
 ---
 
-## 11. Concept 9: Controlled Deterministic Fallback (Reliability Layer for GenAI Systems)
+## 13. Concept 11: Controlled Deterministic Fallback (Reliability Layer for GenAI Systems)
 
 ## What it is
 If external model generation is unavailable or fails, the system produces structured output through deterministic templates.
@@ -197,7 +228,7 @@ If external model generation is unavailable or fails, the system produces struct
 
 ---
 
-## 12. Concept 10: Safety-Aligned Response Augmentation
+## 14. Concept 12: Safety-Aligned Response Augmentation
 
 ## What it is
 Generated output is post-processed by a safety policy layer that can escalate severity and inject emergency actions.
@@ -216,7 +247,7 @@ Generated output is post-processed by a safety policy layer that can escalate se
 
 ---
 
-## 13. Concept 11: Explainable Generation via Section Citations
+## 15. Concept 13: Explainable Generation via Section Citations
 
 ## What it is
 Generated sections are linked to retrieved evidence snippets for transparency.
@@ -231,7 +262,7 @@ Generated sections are linked to retrieved evidence snippets for transparency.
 
 ---
 
-## 14. Concept 12: Clarification Generation for Missing Facts
+## 16. Concept 14: Clarification Generation for Missing Facts
 
 ## What it is
 The system generates follow-up questions when key case details are missing.
@@ -245,7 +276,7 @@ The system generates follow-up questions when key case details are missing.
 
 ---
 
-## 15. Concept 13: Summarization-Oriented Response Compression for Voice Output
+## 17. Concept 15: Summarization-Oriented Response Compression for Voice Output
 
 ## What it is
 A short spoken summary is generated (or selected) from richer structured output for better voice UX.
@@ -260,7 +291,7 @@ A short spoken summary is generated (or selected) from richer structured output 
 
 ---
 
-## 16. Concept 14: Neural Text-to-Speech (Generative Speech Synthesis)
+## 18. Concept 16: Neural Text-to-Speech (Generative Speech Synthesis)
 
 ## What it is
 Text is converted to speech using a neural voice model, with offline fallback.
@@ -280,7 +311,7 @@ Text is converted to speech using a neural voice model, with offline fallback.
 
 ---
 
-## 17. Concept 15: Multi-Stage Guardrailed Generation Architecture
+## 19. Concept 17: Multi-Stage Guardrailed Generation Architecture
 
 ## What it is
 Instead of one-shot generation, the system uses staged conditioning:

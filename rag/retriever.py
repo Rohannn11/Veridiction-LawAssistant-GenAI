@@ -22,6 +22,8 @@ from datasets import Dataset, DatasetDict, load_dataset
 from llama_index.core import Document, StorageContext, VectorStoreIndex, load_index_from_storage
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
+from nlp.text_processing import prepare_text_features
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -214,10 +216,14 @@ class LegalRetriever:
             raise ValueError("Query cannot be empty.")
 
         retrieval_start = time.perf_counter()
+        features = prepare_text_features(user_query)
+        normalized_query = str(features.get("normalized_text", user_query)).strip() or user_query
+        lemmatized_query = str(features.get("lemmatized_text", normalized_query)).strip() or normalized_query
+        query_entities = dict(features.get("named_entities", {}) or {})
 
         similarity_top_k = top_k if top_k is not None else self.config.top_k
-        procedural_intent = self._is_procedural_intent(user_query)
-        rewritten_queries = self._rewrite_queries(user_query, procedural_intent=procedural_intent)
+        procedural_intent = self._is_procedural_intent(lemmatized_query)
+        rewritten_queries = self._rewrite_queries(normalized_query, procedural_intent=procedural_intent)
 
         if procedural_intent:
             procedural_k = max(2, similarity_top_k)
@@ -261,7 +267,7 @@ class LegalRetriever:
                     procedural_results.append(with_bias)
 
         merged = self._merge_dual_results(
-            query=user_query,
+            query=normalized_query,
             judgment_results=judgment_results,
             procedural_results=procedural_results,
             top_k=similarity_top_k,
@@ -274,6 +280,9 @@ class LegalRetriever:
             metadata = dict(item.get("metadata", {}) or {})
             metadata["retrieval_elapsed_ms"] = round(retrieval_elapsed_ms, 2)
             metadata["procedural_fallback_used"] = procedural_fallback_used
+            metadata["normalized_query"] = normalized_query
+            metadata["lemmatized_query"] = lemmatized_query
+            metadata["query_entities"] = query_entities
             item["metadata"] = metadata
 
         return merged
