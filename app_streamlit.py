@@ -106,10 +106,19 @@ def _format_passages_for_table(passages: List[Dict[str, Any]]) -> List[Dict[str,
     return rows
 
 
+def _ui_confidence(output: Dict[str, Any]) -> float:
+    classifier_conf = float(output.get("confidence", 0.0) or 0.0)
+    passages = output.get("retrieved_passages", []) or []
+    retrieval_top = max((float(item.get("score", 0.0) or 0.0) for item in passages), default=0.0)
+    return round(max(classifier_conf, retrieval_top), 4)
+
+
 def _build_structured_json(output: Dict[str, Any], elapsed_ms: float) -> Dict[str, Any]:
     safety = output.get("safety", {}) or {}
     passages = output.get("retrieved_passages", []) or []
     structured_response = output.get("structured_response", {}) or {}
+    raw_classifier_confidence = float(output.get("confidence", 0.0) or 0.0)
+    display_confidence = _ui_confidence(output)
 
     structured = {
         "meta": {
@@ -129,7 +138,8 @@ def _build_structured_json(output: Dict[str, Any], elapsed_ms: float) -> Dict[st
             "lemmatized_query": output.get("lemmatized_query", ""),
             "named_entities": output.get("named_entities", {}),
             "urgency": output.get("urgency", "low"),
-            "confidence": output.get("confidence", 0.0),
+            "confidence": display_confidence,
+            "classifier_confidence_raw": raw_classifier_confidence,
             "intent_labels": output.get("intent_labels", []),
             "intent_scores": output.get("intent_scores", {}),
         },
@@ -841,6 +851,7 @@ def run_pipeline(
 
     elapsed_ms = (time.perf_counter() - start) * 1000
     passages = output.get("retrieved_passages", []) or []
+    display_confidence = _ui_confidence(output)
     passage_table = _format_passages_for_table(passages)
     structured = _build_structured_json(output, elapsed_ms)
     structured["flowchart_graph"] = flowchart_graph_data
@@ -875,7 +886,8 @@ def run_pipeline(
         "secondary_claim_types": list(output.get("secondary_claim_types", []) or []),
         "hybrid_claim_types": list(output.get("hybrid_claim_types", []) or []),
         "urgency": str(output.get("urgency", "low")),
-        "confidence": float(output.get("confidence", 0.0)),
+        "confidence": display_confidence,
+        "classifier_confidence_raw": float(output.get("confidence", 0.0) or 0.0),
         "latency_ms": float(elapsed_ms),
         "intent_labels": list(output.get("intent_labels", []) or []),
         "intent_scores": dict(output.get("intent_scores", {}) or {}),

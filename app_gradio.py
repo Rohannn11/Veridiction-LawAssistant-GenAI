@@ -199,10 +199,19 @@ def _format_passages_for_table(passages: list[dict[str, Any]]) -> list[list[Any]
     return rows
 
 
+def _ui_confidence(output: dict[str, Any]) -> float:
+    classifier_conf = float(output.get("confidence", 0.0) or 0.0)
+    passages = output.get("retrieved_passages", []) or []
+    retrieval_top = max((float(item.get("score", 0.0) or 0.0) for item in passages), default=0.0)
+    return round(max(classifier_conf, retrieval_top), 4)
+
+
 def _build_structured_json(output: dict[str, Any], elapsed_ms: float) -> dict[str, Any]:
     safety = output.get("safety", {}) or {}
     passages = output.get("retrieved_passages", []) or []
     structured_response = output.get("structured_response", {}) or {}
+    raw_classifier_confidence = float(output.get("confidence", 0.0) or 0.0)
+    display_confidence = _ui_confidence(output)
 
     structured = {
         "meta": {
@@ -220,7 +229,8 @@ def _build_structured_json(output: dict[str, Any], elapsed_ms: float) -> dict[st
             "lemmatized_query": output.get("lemmatized_query", ""),
             "named_entities": output.get("named_entities", {}),
             "urgency": output.get("urgency", "low"),
-            "confidence": output.get("confidence", 0.0),
+            "confidence": display_confidence,
+            "classifier_confidence_raw": raw_classifier_confidence,
         },
         "retrieval": {
             "passages": passages,
@@ -518,7 +528,7 @@ def run_end_to_end(
             transcript,
             str(output.get("claim_type", "other")),
             str(output.get("urgency", "low")),
-            float(output.get("confidence", 0.0)),
+            _ui_confidence(output),
             str(output.get("final_text", "")),
             case_scenario_text,
             possible_steps_text,
